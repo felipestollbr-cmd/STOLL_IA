@@ -1,66 +1,112 @@
-import "dotenv/config";
-import express from "express";
-import { createServer } from "http";
-import net from "net";
-import { createExpressMiddleware } from "@trpc/server/adapters/express";
-import { registerOAuthRoutes } from "./oauth";
-import { registerStorageProxy } from "./storageProxy";
-import { appRouter } from "../routers";
-import { createContext } from "./context";
-import { serveStatic, setupVite } from "./vite";
+import express from 'express';
+import cors from 'cors';
+import { createExpressMiddleware } from '@trpc/server/adapters/express';
+import { initDatabase } from '../db';
+import { appRouter } from '../routers';
+import { createContext } from './context';
+import { env } from './env';
+import path from 'path';
+import fs from 'fs';
+import executeRouter from '../routes/execute';
 
-function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise(resolve => {
-    const server = net.createServer();
-    server.listen(port, () => {
-      server.close(() => resolve(true));
-    });
-    server.on("error", () => resolve(false));
-  });
-}
+// ============ INICIALIZAÇÃO DO BANCO ============
+async function start() {
+  console.log('🚀 Iniciando STOLL...');
 
-async function findAvailablePort(startPort: number = 3000): Promise<number> {
-  for (let port = startPort; port < startPort + 20; port++) {
-    if (await isPortAvailable(port)) {
-      return port;
-    }
-  }
-  throw new Error(`No available port found starting from ${startPort}`);
-}
+  // Inicializa o banco SQLite (sql.js)
+  await initDatabase();
+  console.log('📦 Banco de dados pronto');
 
-async function startServer() {
+  // ============ SERVIDOR EXPRESS ============
   const app = express();
-  const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
-  registerStorageProxy(app);
-  registerOAuthRoutes(app);
-  // tRPC API
+
+  // Middlewares
+  app.use(cors({
+    origin: env.NODE_ENV === 'development'
+      ? 'http://localhost:5173'
+      : true,
+    credentials: true,
+  }));
+  app.use(express.json());
+
+  // ============ tRPC ============
   app.use(
-    "/api/trpc",
+    '/trpc',
     createExpressMiddleware({
       router: appRouter,
       createContext,
     })
   );
-  // development mode uses Vite, production mode uses static files
-  if (process.env.NODE_ENV === "development") {
-    await setupVite(app, server);
+
+  app.use('/execute', executeRouter);
+
+  // ============ SERVE FRONTEND ============
+  const clientDistPath = path.join(process.cwd(), 'client', 'dist');
+
+  if (env.NODE_ENV === 'development') {
+    // Em desenvolvimento, o Vite cuida do frontend
+    app.get('/', (req, res) => {
+      res.send(`
+        <!DOCTYPE html>
+        <html lang="pt-br">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>STOLL - Agente Autônomo</title>
+          <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+        </head>
+        <body>
+          <div id="root"></div>
+          <script type="module" src="http://localhost:5173/@vite/client"></script>
+          <script type="module" src="http://localhost:5173/src/main.tsx"></script>
+        </body>
+        </html>
+      `);
+    });
   } else {
-    serveStatic(app);
+    // Em produção, serve os arquivos estáticos do build
+    if (fs.existsSync(clientDistPath)) {
+      app.use(express.static(clientDistPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(clientDistPath, 'index.html'));
+      });
+    } else {
+      app.get('/', (req, res) => {
+        res.send('STOLL Backend - Frontend não compilado. Execute pnpm build primeiro.');
+      });
+    }
   }
 
-  const preferredPort = parseInt(process.env.PORT || "3000");
-  const port = await findAvailablePort(preferredPort);
-
-  if (port !== preferredPort) {
-    console.log(`Port ${preferredPort} is busy, using port ${port} instead`);
-  }
-
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
+  // ============ INICIAR ============
+  const port = env.PORT || 3000;
+  app.listen(port, () => {
+    console.log(`
+╔══════════════════════════════════════════╗
+║        🤖 STOLL - Agente Autônomo       ║
+╠══════════════════════════════════════════╣
+║  Porta: ${String(port).padEnd(30)}║
+║  LLM:   ${(env.LLM_PROVIDER || 'ollama').padEnd(30)}║
+║  Banco: SQLite (sql.js)                 ║
+║  URL:   http://localhost:${port}              ║
+╚══════════════════════════════════════════╝
+✅ STOLL pronto!
+    `);
   });
 }
 
-startServer().catch(console.error);
+// ============ TRATAMENTO DE ERROS ============
+process.on('uncaughtException', (err) => {
+  console.error('❌ Erro não tratado:', err.message);
+  console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason: any) => {
+  console.error('❌ Promise rejeitada não tratada:', reason?.message || reason);
+});
+
+// ============ INICIAR ============
+start().catch((err) => {
+  console.error('❌ Falha ao iniciar o servidor:', err.message);
+  console.error(err.stack);
+  process.exit(1);
+});

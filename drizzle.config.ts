@@ -6,10 +6,10 @@ if (!connectionString) {
 }
 
 export default defineConfig({
-  schema: "./drizzle/schema.ts",
-  out: "./drizzle",
-  dialect: "mysql",
+  schema: './drizzle/schema.ts',
+  out: './drizzle/migrations',
+  dialect: 'sqlite',
   dbCredentials: {
-    url: connectionString,
+    url: './stoll.db',
   },
 });
